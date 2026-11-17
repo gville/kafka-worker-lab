@@ -1,0 +1,62 @@
+services:
+  kafka:
+    image: apache/kafka:4.0.0
+    container_name: kafka-worker-lab-kafka
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: EXTERNAL://:9092,INTERNAL://:9093,CONTROLLER://:9094
+      KAFKA_ADVERTISED_LISTENERS: EXTERNAL://localhost:9092,INTERNAL://kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9094
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "127.0.0.1:9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - kafka_worker_lab
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server localhost:9093 describe --status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  postgres:
+    image: postgres:16.4
+    container_name: kafka-worker-lab-postgres
+    hostname: postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lab_admin
+      POSTGRES_PASSWORD: lab_password
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kafka_worker_lab
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab_admin -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  kafka_data:
+  postgres_data:
+
+networks:
+  kafka_worker_lab:
+    driver: bridge
