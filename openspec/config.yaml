@@ -1,0 +1,34 @@
+schema: spec-driven
+
+context: |
+  This project is an educational laboratory for learning Apache Kafka,
+  event-driven architecture, and distributed worker systems.
+
+  The project must run locally and must not depend on paid cloud services
+  or external managed infrastructure.
+
+  Go is the primary implementation language.
+  Apache Kafka is the messaging platform.
+  Docker Compose is used to run local infrastructure.
+  PostgreSQL is required from the first implementation stage.
+
+  The architecture includes independent services, Kafka consumers,
+  a Transactional Outbox pattern, and PostgreSQL persistence.
+  Each service must own and manage its own data.
+
+  Prefer simple, observable designs that make distributed systems
+  behavior easy to understand and experiment with.
+
+  The first version is local-only: no service authentication, no TLS,
+  no external network exposure, and no production security mechanisms.
+  Host-published Kafka and PostgreSQL ports bind exclusively to localhost.
+  Kafka listeners may bind 0.0.0.0 inside their container for Docker
+  connectivity, but this does not authorize publishing host ports on
+  all interfaces.
+
+  Do not introduce cloud infrastructure, Kubernetes, or additional
+  technologies unless explicitly approved.
+
+  Architectural decisions must be reviewed and approved by the user
+  before implementation. Do not silently change approved decisions.
+  Do not implement features that have been explicitly deferred.
