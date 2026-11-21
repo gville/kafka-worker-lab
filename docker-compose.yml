@@ -32,6 +32,21 @@ services:
       retries: 12
       start_period: 30s
 
+  kafka-init:
+    image: apache/kafka:4.0.0
+    container_name: kafka-worker-lab-kafka-init
+    restart: "no"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9093
+    volumes:
+      - ./kafka/init:/kafka-init:ro
+    networks:
+      - kafka_worker_lab
+    entrypoint: ["bash", "/kafka-init/001_topics.sh"]
+
   postgres:
     image: postgres:16.4
     container_name: kafka-worker-lab-postgres
