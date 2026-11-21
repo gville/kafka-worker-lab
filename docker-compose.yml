@@ -40,10 +40,12 @@ services:
     environment:
       POSTGRES_USER: lab_admin
       POSTGRES_PASSWORD: lab_password
+      POSTGRES_DB: postgres
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./db/postgres/init:/docker-entrypoint-initdb.d:ro
     networks:
       - kafka_worker_lab
     healthcheck:
