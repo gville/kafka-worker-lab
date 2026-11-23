@@ -5,10 +5,12 @@
 # - Published host port must be exactly 127.0.0.1:9092
 set -euo pipefail
 
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO_ROOT"
+
 INTERNAL_BOOTSTRAP="kafka:9093"
 HOST_BOOTSTRAP="localhost:9092"
 EXPECTED_KAFKA_BINDING="127.0.0.1:9092"
-INTERNAL_TOPICS_BIN="/opt/kafka/bin/kafka-topics.sh"
 REQUIRED_TOPICS=(payments.events payments.dlq)
 PORT_FORMAT='{{range $p, $conf := .NetworkSettings.Ports}}{{range $conf}}{{.HostIp}}:{{.HostPort}}{{"\n"}}{{end}}{{end}}'
 
@@ -36,14 +38,14 @@ KAFKA_CID="$(docker compose ps -q kafka 2>/dev/null || true)"
 [ -n "$KAFKA_CID" ] || fail "Kafka Compose service is not running. Start the stack with: docker compose up -d"
 
 set +e
-INTERNAL_OUTPUT="$(docker compose run --rm --entrypoint "$INTERNAL_TOPICS_BIN" kafka-init \
-  --bootstrap-server "$INTERNAL_BOOTSTRAP" --list 2>&1)"
+INTERNAL_OUTPUT="$("$REPO_ROOT/kafka/check/integration.sh" 2>&1)"
 INTERNAL_RC=$?
 set -e
 if [ "$INTERNAL_RC" -ne 0 ]; then
   printf '%s\n' "$INTERNAL_OUTPUT" >&2
-  fail "Compose-service connectivity check through $INTERNAL_BOOTSTRAP failed; verify the stack is healthy."
+  fail "Docker-based integration check failed; verify Kafka readiness through $INTERNAL_BOOTSTRAP."
 fi
+printf '%s\n' "$INTERNAL_OUTPUT"
 
 set +e
 HOST_OUTPUT="$("$HOST_TOPICS_BIN" --bootstrap-server "$HOST_BOOTSTRAP" --list 2>&1)"
@@ -65,7 +67,6 @@ assert_topics() {
   printf 'OK: %s lists %s\n' "$label" "${REQUIRED_TOPICS[*]}"
 }
 
-assert_topics "Compose service ($INTERNAL_BOOTSTRAP)" "$INTERNAL_OUTPUT"
 assert_topics "host tooling ($HOST_BOOTSTRAP)" "$HOST_OUTPUT"
 
 KAFKA_BINDINGS="$(docker inspect --format "$PORT_FORMAT" "$KAFKA_CID" | sed '/^[[:space:]]*$/d')"

@@ -29,3 +29,13 @@ It checks, in order:
 1. a Compose service connects through `kafka:9093`;
 2. host tooling connects through `localhost:9092`;
 3. the Kafka host port is published exactly as `127.0.0.1:9092`, with no additional or wildcard binding.
+
+### Wait for Kafka readiness
+
+The Docker-based integration check waits for broker metadata on `kafka:9093` before listing the lab topics. It runs in a short-lived Compose container and does not need host networking:
+
+```bash
+./kafka/check/integration.sh
+```
+
+Set `KAFKA_READINESS_TIMEOUT_SECONDS` to change the 60-second bound, for example `KAFKA_READINESS_TIMEOUT_SECONDS=10 ./kafka/check/integration.sh`.
