@@ -12,7 +12,7 @@ Approved decisions R1-R10, the four payment statuses, and the two dead-letter ca
 - [x] 2.4 Add documented host and container connection settings for the two Kafka listeners; verify a connectivity check connects from a Compose service through `kafka:9093` and from host tooling through the localhost-published `localhost:9092`, with no host port exposed on all interfaces.
 - [x] 2.5 Add a Docker-based integration check that waits for Kafka readiness through broker metadata before connecting; verify it fails when the broker is stopped and passes when it is running.
 - [x] 2.6 Add a documented reset command that removes containers, data, and Kafka state; verify reset followed by startup recreates the clean baseline.
-- [ ] 2.7 Document local startup, addresses, reset, and troubleshooting in the README or a local run guide; verify every documented command runs as written.
+- [x] 2.7 Document local startup, addresses, reset, and troubleshooting in the README or a local run guide; verify every documented command runs as written.
 - [ ] 2.8 Add shared Kafka producer configuration with `acks=all` and idempotence enabled; verify a test publication is not treated as successful before broker acknowledgement.
 - [ ] 2.9 Add shared health and readiness plumbing, and require every service scaffold to expose both endpoints; verify liveness succeeds while a service is running and readiness fails when a required dependency is unavailable.
 - [ ] 2.10 Add shared structured JSON logging to stdout/stderr and use it in every service scaffold; verify emitted lines parse as JSON and no service writes log files.
