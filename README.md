@@ -19,10 +19,21 @@ Both listeners use `PLAINTEXT`. This local version has no authentication and no 
 With the stack running (`docker compose up -d`), run:
 
 ```bash
-KAFKA_TOPICS_BIN=/path/to/kafka-topics.sh ./kafka/check/connectivity.sh
+./kafka/check/connectivity.sh
 ```
 
-`KAFKA_TOPICS_BIN` must point to `kafka-topics.sh` from Kafka 4.0.0 installed on the host. If that command is already on `PATH`, the variable may be omitted. The script does not add any host-specific path to the repository. Kafka 4.0.0 requires Java 17 or newer; set `JAVA_HOME` and `PATH` accordingly if the CLI reports `UnsupportedClassVersionError`.
+`connectivity.sh` checks the internal listener from a Compose service and then runs `kafka-topics.sh` **from the host** to verify the published `localhost:9092` listener. If `kafka-topics.sh` from Kafka 4.0.0 is already on `PATH`, no configuration is needed. If it is installed elsewhere, set `KAFKA_TOPICS_BIN` to the path of the executable, not its directory. The script does not add any host-specific path to the repository.
+
+The Kafka 4.0.0 CLI requires Java 17 or newer. If the host's default Java is older, select a compatible JDK for the check by prefixing the variables to the command; no `export` or shell profile change is needed:
+
+```bash
+JAVA_HOME=/path/to/jdk-17 \
+PATH=/path/to/jdk-17/bin:$PATH \
+KAFKA_TOPICS_BIN=/path/to/kafka-topics.sh \
+  ./kafka/check/connectivity.sh
+```
+
+If a compatible local CLI is already available, there is no need to install Kafka again on the host. The CLI inside the container cannot replace this check: it would only exercise the internal listener, not the `localhost:9092` listener published to the host.
 
 It checks, in order:
 
@@ -39,3 +50,27 @@ The Docker-based integration check waits for broker metadata on `kafka:9093` bef
 ```
 
 Set `KAFKA_READINESS_TIMEOUT_SECONDS` to change the 60-second bound, for example `KAFKA_READINESS_TIMEOUT_SECONDS=10 ./kafka/check/integration.sh`.
+
+### Reset the lab
+
+The reset is destructive and irreversible. It removes the Compose containers and the project network, and deletes the entire local `postgres_data` volume with all its contents: the seven lab databases, any other database in the cluster, and all roles, schemas and data. It also deletes the entire `kafka_data` volume, including Kafka state such as topics, offsets and consumer groups. Docker images and resources outside this Compose project are kept; Compose does not remove external volumes.
+
+Preview what would be removed without changing anything:
+
+```bash
+./scripts/reset.sh --dry-run
+```
+
+Run with interactive confirmation (the literal `yes` is required):
+
+```bash
+./scripts/reset.sh
+```
+
+For non-interactive use:
+
+```bash
+./scripts/reset.sh --yes
+```
+
+After a reset, recreate the clean baseline with `docker compose up -d`; initialization recreates the databases and topics from empty volumes. Stopping or restarting services (`docker compose stop`, `docker compose start`, `docker compose restart`) preserves all data and is not a reset.
