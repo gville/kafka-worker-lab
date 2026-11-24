@@ -23,11 +23,13 @@ Expected state:
 | `kafka` | `Up (healthy)` |
 | `postgres` | `Up (healthy)` |
 | `kafka-init` | `Exited (0)` |
+| `payments-migrations` | `Exited (0)` |
 
-`kafka-init` is a one-shot initialization job: `Exited (0)` means it finished successfully. Plain `docker compose ps` does not list it because it is no longer running. To inspect its work:
+`kafka-init` and `payments-migrations` are one-shot initialization jobs: `Exited (0)` means they finished successfully. Plain `docker compose ps` does not list them because they are no longer running. To inspect their work:
 
 ```bash
 docker compose logs kafka-init
+docker compose logs payments-migrations
 ```
 
 ## Addresses and connections
@@ -92,6 +94,34 @@ docker compose exec postgres psql -U lab_admin -d postgres -Atc "SELECT datname 
 
 Both commands run inside the `postgres` container, so they do not require `psql` installed on the host. The query lists the seven lab databases plus the `postgres` maintenance database.
 
+### Database migrations
+
+`docker compose up -d` runs the `payments-migrations` one-shot service after PostgreSQL reports healthy. It applies the versioned SQL files in `db/postgres/migrations/payments_db/` in lexicographic order. To rerun the same pending-migration check on demand (safe to repeat):
+
+```bash
+docker compose run --rm payments-migrations
+```
+
+The runner is `db/postgres/migrate.sh`; it uses `psql` and adds no Go dependency. Its inputs:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATABASE_URL` | required | Full PostgreSQL connection URL for the target database and owner role. Never printed by the runner. |
+| `MIGRATIONS_DIR` | required | Directory containing the ordered `*.sql` files. |
+| `MIGRATIONS_SCHEMA` | `payment_api` | Schema holding `schema_migrations` and the migrated objects. |
+
+Host-side example (requires `psql` on the host and the published localhost port):
+
+```bash
+DATABASE_URL='postgres://payment_api:lab_password@localhost:5432/payments_db?sslmode=disable' \
+MIGRATIONS_DIR=db/postgres/migrations/payments_db \
+  ./db/postgres/migrate.sh
+```
+
+Behavior: the runner creates `payment_api.schema_migrations` with `CREATE TABLE IF NOT EXISTS` before reading it, so a fresh database needs no bootstrap migration and the initialization itself is never recorded as a version. Each pending file runs as `BEGIN; <file>; INSERT INTO schema_migrations; COMMIT;` in one `psql` session; with `ON_ERROR_STOP`, a failure rolls back both the schema change and the version row and stops the run. Applied versions are skipped. There is no concurrent-run lock in v1, so run a single migration job at a time.
+
+Outbox ordering: the single sequential publisher reads pending rows ordered by `id`. That `id` reflects the identity sequence's assignment order, not the global commit order of concurrent transactions; a strict global order remains to be evaluated in 3.3. These migrations introduce no advisory lock and do not change publication logic.
+
 ## Stop, restart and reset
 
 `docker compose stop`, `docker compose start` and `docker compose restart` preserve the named volumes and all data; they are not a reset.
@@ -129,6 +159,7 @@ After a reset, recreate the clean baseline with `docker compose up -d`; initiali
 | `UnsupportedClassVersionError` from the host CLI | Host Java older than 17 | `java -version` | Prefix `JAVA_HOME` and `PATH` with a JDK 17+ using the template above. |
 | Host CLI cannot reach `localhost:9092` | Broker unhealthy or port published incorrectly | `docker compose ps`, `./kafka/check/connectivity.sh` | The port must read `127.0.0.1:9092->9092/tcp`; the check fails on wildcard or extra bindings. Do not publish on `0.0.0.0`. |
 | `postgres` is `unhealthy` or unreachable from the host | Docker/Compose down, port busy or init failed | `docker compose ps`, `docker compose logs postgres`, `docker compose exec postgres pg_isready -U lab_admin -d postgres` | Confirm `127.0.0.1:5432->5432/tcp`; wait or restart; inspect the PostgreSQL service logs with `docker compose logs postgres`, not the `kafka-init` logs. |
+| `payments-migrations` exited non-zero | A migration failed; that version was rolled back | `docker compose logs payments-migrations`, `docker compose exec postgres psql -U lab_admin -d payments_db -c "SELECT version, applied_at FROM payment_api.schema_migrations ORDER BY version"` | Fix the SQL and rerun `docker compose run --rm payments-migrations`. Do not edit an already applied version; add a new ordered file instead. |
 | Lab databases are missing | Connected to another instance or an already initialized volume | `docker compose exec postgres psql -U lab_admin -d postgres -Atc "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY 1"` | Verify the `kafka-worker-lab-postgres` container; `postgres` is the maintenance database, not an eighth lab database. PostgreSQL initialization scripts run only when the data volume is initialized for the first time with an empty data directory. If the volume already existed before those scripts were added or changed, PostgreSQL does not run them again automatically. To rebuild from scratch, use the documented [reset procedure](#stop-restart-and-reset); it is destructive and deletes all persisted data. |
 | Old data or topics are still present | `stop`/`start`/`restart` keep volumes; no reset was run | `./scripts/reset.sh --dry-run` | Do not confuse this with a restart: the reset is destructive and irreversible and deletes the Kafka and PostgreSQL volumes. Preview first with `--dry-run`; only if losing all data is intended, run `./scripts/reset.sh` and then `docker compose up -d`. |
 | `docker` or `docker compose` command not found | Docker or the Compose plugin is missing | `command -v docker`, `docker compose version` | Install or enable Docker Engine and the Compose plugin first. |

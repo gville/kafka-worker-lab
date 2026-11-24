@@ -70,6 +70,24 @@ services:
       retries: 10
       start_period: 10s
 
+  payments-migrations:
+    image: postgres:16.4
+    container_name: kafka-worker-lab-payments-migrations
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "postgres://payment_api:lab_password@postgres:5432/payments_db?sslmode=disable"
+      MIGRATIONS_DIR: /migrations/payments_db
+      MIGRATIONS_SCHEMA: payment_api
+    volumes:
+      - ./db/postgres/migrate.sh:/migrate.sh:ro
+      - ./db/postgres/migrations:/migrations:ro
+    networks:
+      - kafka_worker_lab
+    entrypoint: ["bash", "/migrate.sh"]
+
 volumes:
   kafka_data:
   postgres_data:
