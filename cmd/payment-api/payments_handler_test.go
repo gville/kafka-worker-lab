@@ -188,6 +188,21 @@ func TestIsIdempotencyPKViolation(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "idempotency payment unique constraint",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "idempotency_payment_id_uq"},
+			want: false,
+		},
+		{
+			name: "outbox payment unique constraint",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "outbox_payment_id_uq"},
+			want: false,
+		},
+		{
+			name: "outbox event unique constraint",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "outbox_event_id_uq"},
+			want: false,
+		},
+		{
 			name: "other sqlstate",
 			err:  &pgconn.PgError{Code: "23503", ConstraintName: "idempotency_pkey"},
 			want: false,
@@ -367,6 +382,9 @@ func TestCreatePaymentStoreError(t *testing.T) {
 	recorder := servePayment(t, testPaymentHandler(store), headerPtr("key-1"), validPaymentBody)
 
 	assertPaymentError(t, recorder, http.StatusInternalServerError, "INTERNAL_ERROR")
+	if recorder.Code == http.StatusAccepted {
+		t.Fatal("store error returned HTTP 202 Accepted")
+	}
 	var body errorResponseBody
 	decodeJSONBody(t, recorder, &body)
 	if body.Error.Message != messageInternalError {
