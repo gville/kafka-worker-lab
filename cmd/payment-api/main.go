@@ -99,15 +99,27 @@ func newHealthHandler(check health.Check) http.Handler {
 	})
 }
 
+func newRouter(healthHandler, paymentsHandler http.Handler) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/health", healthHandler)
+	mux.Handle("/ready", healthHandler)
+	mux.Handle("POST /payments", paymentsHandler)
+	return mux
+}
+
 func run(cfg config, logger *slog.Logger) error {
 	db, err := sql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
 		return errors.New("could not initialize payments_db connection")
 	}
 
+	healthHandler := newHealthHandler(db.PingContext)
+	store := newPostgresPaymentStore(db)
+	paymentsHandler := newPaymentsHandler(store, logger)
+
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
-		Handler: newHealthHandler(db.PingContext),
+		Handler: newRouter(healthHandler, paymentsHandler),
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
