@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const validPaymentBody = `{"amountMinorUnits":12550,"currency":"ARS"}`
@@ -17,11 +22,11 @@ const validPaymentBody = `{"amountMinorUnits":12550,"currency":"ARS"}`
 type fakePaymentStore struct {
 	payment Payment
 	err     error
-	calls   []NewPayment
+	calls   []CreatePaymentRequest
 }
 
-func (f *fakePaymentStore) CreatePayment(_ context.Context, payment NewPayment) (Payment, error) {
-	f.calls = append(f.calls, payment)
+func (f *fakePaymentStore) CreatePayment(_ context.Context, request CreatePaymentRequest) (Payment, error) {
+	f.calls = append(f.calls, request)
 	if f.err != nil {
 		return Payment{}, f.err
 	}
@@ -87,6 +92,122 @@ func assertPaymentError(t *testing.T, recorder *httptest.ResponseRecorder, statu
 	}
 }
 
+func assertCreatePaymentCall(t *testing.T, call CreatePaymentRequest, key string, payment NewPayment) {
+	t.Helper()
+	if call.IdempotencyKey != key {
+		t.Fatalf("idempotency key = %q, want %q", call.IdempotencyKey, key)
+	}
+	if call.Payment != payment {
+		t.Fatalf("payment = %+v, want %+v", call.Payment, payment)
+	}
+	wantHash, err := canonicalRequestHash(payment)
+	if err != nil {
+		t.Fatalf("canonicalRequestHash() error = %v", err)
+	}
+	if call.RequestHash != wantHash {
+		t.Fatalf("request hash = %x, want %x", call.RequestHash, wantHash)
+	}
+}
+
+func TestCanonicalRequestHash(t *testing.T) {
+	payment := NewPayment{AmountMinorUnits: 12550, Currency: "ARS"}
+	got, err := canonicalRequestHash(payment)
+	if err != nil {
+		t.Fatalf("canonicalRequestHash() error = %v", err)
+	}
+	want := sha256.Sum256([]byte(`{"amountMinorUnits":12550,"currency":"ARS"}`))
+	if got != want {
+		t.Fatalf("hash = %x, want %x", got, want)
+	}
+
+	same, err := canonicalRequestHash(NewPayment{AmountMinorUnits: 12550, Currency: "ARS"})
+	if err != nil {
+		t.Fatalf("canonicalRequestHash(same) error = %v", err)
+	}
+	if same != got {
+		t.Fatalf("same content hash = %x, want %x", same, got)
+	}
+
+	for name, changed := range map[string]NewPayment{
+		"amount":   {AmountMinorUnits: 12600, Currency: "ARS"},
+		"currency": {AmountMinorUnits: 12550, Currency: "USD"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hash, err := canonicalRequestHash(changed)
+			if err != nil {
+				t.Fatalf("canonicalRequestHash() error = %v", err)
+			}
+			if hash == got {
+				t.Fatalf("changed content hash = %x, want a different hash", hash)
+			}
+		})
+	}
+}
+
+func TestPaymentSnapshotRoundTrip(t *testing.T) {
+	want := paymentSnapshot{
+		PaymentID: "33333333-3333-4333-8333-333333333333",
+		Status:    "PENDING",
+	}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if string(data) != `{"paymentId":"33333333-3333-4333-8333-333333333333","status":"PENDING"}` {
+		t.Fatalf("snapshot JSON = %s", data)
+	}
+
+	var got paymentSnapshot
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("snapshot = %+v, want %+v", got, want)
+	}
+}
+
+func TestIsIdempotencyPKViolation(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "matching constraint",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "idempotency_pkey"},
+			want: true,
+		},
+		{
+			name: "wrapped matching constraint",
+			err:  fmt.Errorf("insert idempotency: %w", &pgconn.PgError{Code: "23505", ConstraintName: "idempotency_pkey"}),
+			want: true,
+		},
+		{
+			name: "other constraint",
+			err:  &pgconn.PgError{Code: "23505", ConstraintName: "payments_pkey"},
+			want: false,
+		},
+		{
+			name: "other sqlstate",
+			err:  &pgconn.PgError{Code: "23503", ConstraintName: "idempotency_pkey"},
+			want: false,
+		},
+		{
+			name: "non postgres error",
+			err:  errors.New("database unavailable"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isIdempotencyPKViolation(tt.err); got != tt.want {
+				t.Fatalf("isIdempotencyPKViolation() = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCreatePaymentValidCurrencies(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -124,10 +245,10 @@ func TestCreatePaymentValidCurrencies(t *testing.T) {
 			if len(store.calls) != 1 {
 				t.Fatalf("store calls = %d, want 1", len(store.calls))
 			}
-			want := NewPayment{AmountMinorUnits: tt.amount, Currency: tt.currency}
-			if store.calls[0] != want {
-				t.Fatalf("store call = %+v, want %+v", store.calls[0], want)
-			}
+			assertCreatePaymentCall(t, store.calls[0], "key-1", NewPayment{
+				AmountMinorUnits: tt.amount,
+				Currency:         tt.currency,
+			})
 		})
 	}
 }
@@ -208,6 +329,37 @@ func TestCreatePaymentRejectsInvalidContent(t *testing.T) {
 	}
 }
 
+func TestCreatePaymentInvalidBodyWithKnownKey(t *testing.T) {
+	store := &fakePaymentStore{err: ErrIdempotencyConflict}
+
+	recorder := servePayment(t, testPaymentHandler(store), headerPtr("known-key"), `{"amountMinorUnits":0,"currency":"ARS"}`)
+
+	assertPaymentError(t, recorder, http.StatusUnprocessableEntity, "INVALID_REQUEST")
+	if len(store.calls) != 0 {
+		t.Fatalf("store calls = %d, want 0", len(store.calls))
+	}
+}
+
+func TestCreatePaymentConflict(t *testing.T) {
+	store := &fakePaymentStore{err: ErrIdempotencyConflict}
+
+	recorder := servePayment(t, testPaymentHandler(store), headerPtr("same-key"), validPaymentBody)
+
+	assertPaymentError(t, recorder, http.StatusConflict, errorCodeIdempotencyConflict)
+	var body errorResponseBody
+	decodeJSONBody(t, recorder, &body)
+	if body.Error.Message != messageIdempotencyConflict {
+		t.Fatalf("error.message = %q, want %q", body.Error.Message, messageIdempotencyConflict)
+	}
+	if len(store.calls) != 1 {
+		t.Fatalf("store calls = %d, want 1", len(store.calls))
+	}
+	assertCreatePaymentCall(t, store.calls[0], "same-key", NewPayment{
+		AmountMinorUnits: 12550,
+		Currency:         "ARS",
+	})
+}
+
 func TestCreatePaymentStoreError(t *testing.T) {
 	sentinel := errors.New("database unavailable")
 	store := &fakePaymentStore{err: sentinel}
@@ -230,8 +382,9 @@ func TestCreatePaymentStoreError(t *testing.T) {
 
 func TestCreatePaymentDoesNotNormalizeHeader(t *testing.T) {
 	store := &fakePaymentStore{}
+	key := "  key with spaces  "
 
-	recorder := servePayment(t, testPaymentHandler(store), headerPtr("  key with spaces  "), validPaymentBody)
+	recorder := servePayment(t, testPaymentHandler(store), headerPtr(key), validPaymentBody)
 
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body = %q", recorder.Code, http.StatusAccepted, recorder.Body.String())
@@ -239,21 +392,48 @@ func TestCreatePaymentDoesNotNormalizeHeader(t *testing.T) {
 	if len(store.calls) != 1 {
 		t.Fatalf("store calls = %d, want 1", len(store.calls))
 	}
+	assertCreatePaymentCall(t, store.calls[0], key, NewPayment{
+		AmountMinorUnits: 12550,
+		Currency:         "ARS",
+	})
 }
 
-func TestCreatePaymentDoesNotReplayInThisTask(t *testing.T) {
-	store := &fakePaymentStore{}
+func TestCreatePaymentReplayUsesOriginalResult(t *testing.T) {
+	original := Payment{
+		PaymentID: "44444444-4444-4444-8444-444444444444",
+		Status:    "PENDING",
+	}
+	store := &fakePaymentStore{payment: original}
 	handler := testPaymentHandler(store)
 
+	var responses []paymentResponseBody
 	for i := 0; i < 2; i++ {
 		recorder := servePayment(t, handler, headerPtr("same-key"), validPaymentBody)
 		if recorder.Code != http.StatusAccepted {
 			t.Fatalf("request %d status = %d, want %d; body = %q", i+1, recorder.Code, http.StatusAccepted, recorder.Body.String())
 		}
+		var response paymentResponseBody
+		decodeJSONBody(t, recorder, &response)
+		responses = append(responses, response)
 	}
 
+	want := paymentResponseBody{PaymentID: original.PaymentID, Status: original.Status}
+	for i, response := range responses {
+		if response != want {
+			t.Fatalf("response %d = %+v, want %+v", i+1, response, want)
+		}
+	}
 	if len(store.calls) != 2 {
 		t.Fatalf("store calls = %d, want 2", len(store.calls))
+	}
+	for i, call := range store.calls {
+		assertCreatePaymentCall(t, call, "same-key", NewPayment{
+			AmountMinorUnits: 12550,
+			Currency:         "ARS",
+		})
+		if call.RequestHash != store.calls[0].RequestHash {
+			t.Fatalf("call %d hash = %x, want %x", i+1, call.RequestHash, store.calls[0].RequestHash)
+		}
 	}
 }
 
@@ -269,12 +449,10 @@ func TestCreatePaymentDuplicateJSONKeysLastWins(t *testing.T) {
 	if len(store.calls) != 1 {
 		t.Fatalf("store calls = %d, want 1", len(store.calls))
 	}
-	if store.calls[0].AmountMinorUnits != 2 {
-		t.Fatalf("amountMinorUnits = %d, want 2", store.calls[0].AmountMinorUnits)
-	}
-	if store.calls[0].Currency != "ARS" {
-		t.Fatalf("currency = %q, want %q", store.calls[0].Currency, "ARS")
-	}
+	assertCreatePaymentCall(t, store.calls[0], "key-1", NewPayment{
+		AmountMinorUnits: 2,
+		Currency:         "ARS",
+	})
 }
 
 func TestRouterRegistersHealthAndPayments(t *testing.T) {

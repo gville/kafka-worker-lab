@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,19 +16,33 @@ const (
 
 	errorCodeMissingIdempotencyKey = "MISSING_IDEMPOTENCY_KEY"
 	errorCodeInvalidRequest        = "INVALID_REQUEST"
+	errorCodeIdempotencyConflict   = "IDEMPOTENCY_KEY_CONFLICT"
 	errorCodeInternalError         = "INTERNAL_ERROR"
 
 	messageMissingIdempotencyKey = "Idempotency-Key header is required"
 	messageInvalidRequest        = "request body must be a JSON object with a positive integer amountMinorUnits and currency ARS or USD"
+	messageIdempotencyConflict   = "Idempotency-Key was already used with different request content"
 	messageInternalError         = "could not create payment"
 )
 
-var errInvalidPaymentRequest = errors.New("invalid payment request")
+var (
+	errInvalidPaymentRequest = errors.New("invalid payment request")
+	ErrIdempotencyConflict   = errors.New("idempotency key reused with different content")
+)
 
-// PaymentStore persists a new payment. Implementations must return an error
-// unless the insert has committed.
+// CreatePaymentRequest carries the validated request content and the
+// idempotency identity to the store.
+type CreatePaymentRequest struct {
+	Payment        NewPayment
+	IdempotencyKey string
+	RequestHash    [32]byte
+}
+
+// PaymentStore creates a payment or resolves an existing idempotency record.
+// Implementations must return an error unless the create has committed or an
+// existing record has been read successfully.
 type PaymentStore interface {
-	CreatePayment(ctx context.Context, payment NewPayment) (Payment, error)
+	CreatePayment(ctx context.Context, request CreatePaymentRequest) (Payment, error)
 }
 
 // NewPayment contains only the validated request fields needed for an insert.
@@ -40,6 +55,11 @@ type NewPayment struct {
 type Payment struct {
 	PaymentID string
 	Status    string
+}
+
+type canonicalPaymentRequest struct {
+	AmountMinorUnits int64  `json:"amountMinorUnits"`
+	Currency         string `json:"currency"`
 }
 
 type createPaymentResponse struct {
@@ -69,7 +89,8 @@ func newPaymentsHandler(store PaymentStore, logger *slog.Logger) http.Handler {
 }
 
 func (h *paymentsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.TrimSpace(r.Header.Get(idempotencyKeyHeader)) == "" {
+	idempotencyKey := r.Header.Get(idempotencyKeyHeader)
+	if strings.TrimSpace(idempotencyKey) == "" {
 		writePaymentError(w, http.StatusBadRequest, errorCodeMissingIdempotencyKey, messageMissingIdempotencyKey)
 		return
 	}
@@ -80,8 +101,23 @@ func (h *paymentsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.store.CreatePayment(r.Context(), payment)
+	requestHash, err := canonicalRequestHash(payment)
 	if err != nil {
+		h.logger.Error("could not hash payment request", "error", err)
+		writePaymentError(w, http.StatusInternalServerError, errorCodeInternalError, messageInternalError)
+		return
+	}
+
+	created, err := h.store.CreatePayment(r.Context(), CreatePaymentRequest{
+		Payment:        payment,
+		IdempotencyKey: idempotencyKey,
+		RequestHash:    requestHash,
+	})
+	if err != nil {
+		if errors.Is(err, ErrIdempotencyConflict) {
+			writePaymentError(w, http.StatusConflict, errorCodeIdempotencyConflict, messageIdempotencyConflict)
+			return
+		}
 		h.logger.Error("could not create payment", "error", err)
 		writePaymentError(w, http.StatusInternalServerError, errorCodeInternalError, messageInternalError)
 		return
@@ -91,6 +127,17 @@ func (h *paymentsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		PaymentID: created.PaymentID,
 		Status:    created.Status,
 	})
+}
+
+func canonicalRequestHash(payment NewPayment) ([32]byte, error) {
+	payload, err := json.Marshal(canonicalPaymentRequest{
+		AmountMinorUnits: payment.AmountMinorUnits,
+		Currency:         payment.Currency,
+	})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(payload), nil
 }
 
 func decodeCreatePaymentRequest(body io.Reader) (NewPayment, error) {

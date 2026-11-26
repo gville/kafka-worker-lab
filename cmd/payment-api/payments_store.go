@@ -1,47 +1,159 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type postgresPaymentStore struct {
-	db *sql.DB
+	db     *sql.DB
+	logger *slog.Logger
+}
+
+// paymentSnapshot is the stored replay payload. It is intentionally separate
+// from the HTTP response type so the store does not depend on handler types.
+type paymentSnapshot struct {
+	PaymentID string `json:"paymentId"`
+	Status    string `json:"status"`
 }
 
 func newPostgresPaymentStore(db *sql.DB) PaymentStore {
-	return &postgresPaymentStore{db: db}
+	return &postgresPaymentStore{db: db, logger: slog.Default()}
 }
 
-func (s *postgresPaymentStore) CreatePayment(ctx context.Context, payment NewPayment) (Payment, error) {
+func (s *postgresPaymentStore) CreatePayment(ctx context.Context, request CreatePaymentRequest) (Payment, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Payment{}, fmt.Errorf("begin payment transaction: %w", err)
+	}
+
+	txDone := false
+	defer func() {
+		if txDone {
+			return
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			s.logger.Error("payment transaction rollback failed", "error", rollbackErr)
+		}
+	}()
+
 	paymentID, err := newUUIDv4()
 	if err != nil {
 		return Payment{}, fmt.Errorf("generate payment id: %w", err)
 	}
 
 	// correlation_id and status are intentionally omitted so PostgreSQL applies
-	// its defaults. This single statement commits in autocommit mode.
+	// its defaults.
 	var status string
-	err = s.db.QueryRowContext(
+	err = tx.QueryRowContext(
 		ctx,
 		`INSERT INTO payment_api.payments (payment_id, amount_minor_units, currency)
 		 VALUES ($1, $2, $3)
 		 RETURNING status`,
 		paymentID,
-		payment.AmountMinorUnits,
-		payment.Currency,
+		request.Payment.AmountMinorUnits,
+		request.Payment.Currency,
 	).Scan(&status)
 	if err != nil {
 		return Payment{}, fmt.Errorf("insert payment: %w", err)
 	}
 
+	snapshot, err := json.Marshal(paymentSnapshot{
+		PaymentID: paymentID,
+		Status:    status,
+	})
+	if err != nil {
+		return Payment{}, fmt.Errorf("marshal response snapshot: %w", err)
+	}
+
+	_, err = tx.ExecContext(
+		ctx,
+		`INSERT INTO payment_api.idempotency
+		     (idempotency_key, request_hash, payment_id, response_snapshot)
+		 VALUES ($1, $2, $3, $4)`,
+		request.IdempotencyKey,
+		request.RequestHash[:],
+		paymentID,
+		string(snapshot),
+	)
+	if err != nil {
+		if !isIdempotencyPKViolation(err) {
+			return Payment{}, fmt.Errorf("insert idempotency: %w", err)
+		}
+
+		txDone = true
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			s.logger.Error("payment transaction rollback failed", "error", rollbackErr)
+			return Payment{}, fmt.Errorf("roll back conflicting payment transaction: %w", rollbackErr)
+		}
+		return s.resolveExistingPayment(ctx, request)
+	}
+
+	if err := tx.Commit(); err != nil {
+		txDone = true
+		return Payment{}, fmt.Errorf("commit payment transaction: %w", err)
+	}
+	txDone = true
+
 	return Payment{
 		PaymentID: paymentID,
 		Status:    status,
 	}, nil
+}
+
+// resolveExistingPayment reads the winning idempotency record after the
+// conflicting transaction has rolled back. Any malformed or missing record is
+// treated as an internal error rather than as a replay.
+func (s *postgresPaymentStore) resolveExistingPayment(ctx context.Context, request CreatePaymentRequest) (Payment, error) {
+	var storedHash []byte
+	var storedSnapshot []byte
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT request_hash, response_snapshot
+		 FROM payment_api.idempotency
+		 WHERE idempotency_key = $1`,
+		request.IdempotencyKey,
+	).Scan(&storedHash, &storedSnapshot)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Payment{}, fmt.Errorf("idempotency record not found after conflict: %w", err)
+		}
+		return Payment{}, fmt.Errorf("query existing idempotency: %w", err)
+	}
+
+	if !bytes.Equal(storedHash, request.RequestHash[:]) {
+		return Payment{}, ErrIdempotencyConflict
+	}
+
+	var snapshot paymentSnapshot
+	if err := json.Unmarshal(storedSnapshot, &snapshot); err != nil {
+		return Payment{}, fmt.Errorf("decode response snapshot: %w", err)
+	}
+	if snapshot.PaymentID == "" || snapshot.Status == "" {
+		return Payment{}, errors.New("stored response snapshot is incomplete")
+	}
+
+	return Payment{
+		PaymentID: snapshot.PaymentID,
+		Status:    snapshot.Status,
+	}, nil
+}
+
+func isIdempotencyPKViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == "23505" && pgErr.ConstraintName == "idempotency_pkey"
 }
 
 func newUUIDv4() (string, error) {
