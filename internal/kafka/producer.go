@@ -4,9 +4,11 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 // ProducerConfig contains the connection settings required by a producer.
@@ -59,6 +61,23 @@ func (p *Producer) Publish(ctx context.Context, record *kgo.Record) error {
 		return errors.New("kafka: nil record")
 	}
 	return p.client.ProduceSync(ctx, record).FirstErr()
+}
+
+// Check verifies broker availability by requesting cluster metadata through
+// the existing client. It publishes nothing and respects ctx.
+func (p *Producer) Check(ctx context.Context) error {
+	response, err := p.client.Request(ctx, &kmsg.MetadataRequest{})
+	if err != nil {
+		return err
+	}
+	metadata, ok := response.(*kmsg.MetadataResponse)
+	if !ok || metadata == nil {
+		return fmt.Errorf("kafka: unexpected metadata response %T", response)
+	}
+	if len(metadata.Brokers) == 0 {
+		return errors.New("kafka: metadata response contains no brokers")
+	}
+	return nil
 }
 
 // Close releases the underlying client resources. It is safe to call more than once.

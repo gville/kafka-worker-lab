@@ -186,3 +186,45 @@ func TestPublishPropagatesBrokerError(t *testing.T) {
 		t.Fatalf("waiting for fault: %v", err)
 	}
 }
+
+func TestCheckSucceedsWithBrokerMetadata(t *testing.T) {
+	_, producer := newTestProducer(t)
+
+	if err := producer.Check(testContext(t)); err != nil {
+		t.Fatalf("Check returned error: %v", err)
+	}
+}
+
+func TestCheckRespectsCanceledContext(t *testing.T) {
+	_, producer := newTestProducer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := producer.Check(ctx); err == nil {
+		t.Fatal("Check returned no error with a canceled context")
+	}
+}
+
+func TestCheckFailsWhenBrokerIsUnavailable(t *testing.T) {
+	cluster, err := kfake.NewCluster(kfake.NumBrokers(1))
+	if err != nil {
+		t.Fatalf("create fake cluster: %v", err)
+	}
+	addrs := cluster.ListenAddrs()
+	cluster.Close()
+
+	producer, err := NewProducer(ProducerConfig{
+		Brokers:  addrs,
+		ClientID: "producer-test",
+	})
+	if err != nil {
+		t.Fatalf("create producer: %v", err)
+	}
+	t.Cleanup(producer.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := producer.Check(ctx); err == nil {
+		t.Fatal("Check returned no error with an unavailable broker")
+	}
+}

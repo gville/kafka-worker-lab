@@ -88,6 +88,38 @@ services:
       - kafka_worker_lab
     entrypoint: ["bash", "/migrate.sh"]
 
+  outbox-publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: kafka-worker-lab-outbox-publisher:local
+    container_name: kafka-worker-lab-outbox-publisher
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      payments-migrations:
+        condition: service_completed_successfully
+    environment:
+      OUTBOX_PUBLISHER_POLL_INTERVAL: "1s"
+      OUTBOX_PUBLISHER_BATCH_SIZE: "100"
+      OUTBOX_PUBLISHER_KAFKA_BROKERS: "kafka:9093"
+      OUTBOX_PUBLISHER_DATABASE_URL: "postgres://outbox_publisher:lab_password@postgres:5432/payments_db?sslmode=disable"
+      OUTBOX_PUBLISHER_HTTP_ADDR: ":8081"
+      OUTBOX_PUBLISHER_PUBLISH_TIMEOUT: "5s"
+    networks:
+      - kafka_worker_lab
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
 volumes:
   kafka_data:
   postgres_data:
