@@ -13,6 +13,10 @@ WHERE published_at IS NULL
 ORDER BY id ASC
 LIMIT $1`
 
+const pendingOutboxCountQuery = `
+SELECT count(*) FROM payment_api.outbox
+WHERE published_at IS NULL`
+
 const markOutboxPublishedQuery = `
 UPDATE payment_api.outbox
 SET published_at = now()
@@ -55,6 +59,14 @@ func (s *outboxStore) Pending(ctx context.Context, limit int) ([]outboxRecord, e
 		return nil, fmt.Errorf("iterate pending outbox rows: %w", err)
 	}
 	return records, nil
+}
+
+func (s *outboxStore) PendingCount(ctx context.Context) (int64, error) {
+	var count int64
+	if err := s.db.QueryRowContext(ctx, pendingOutboxCountQuery).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count pending outbox rows: %w", err)
+	}
+	return count, nil
 }
 
 func (s *outboxStore) MarkPublished(ctx context.Context, id int64) error {

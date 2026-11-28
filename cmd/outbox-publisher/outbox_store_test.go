@@ -225,6 +225,75 @@ func TestPendingPropagatesScanError(t *testing.T) {
 	}
 }
 
+func TestPendingCountQueriesOnlyOutboxWithoutLimit(t *testing.T) {
+	store := newFakeStore(t)
+	registeredStoreDriver.mu.Lock()
+	registeredStoreDriver.columns = []string{"count"}
+	registeredStoreDriver.values = [][]driver.Value{{int64(7)}}
+	registeredStoreDriver.mu.Unlock()
+
+	count, err := store.PendingCount(context.Background())
+	if err != nil {
+		t.Fatalf("PendingCount() error = %v", err)
+	}
+	if count != 7 {
+		t.Fatalf("count = %d, want 7", count)
+	}
+
+	registeredStoreDriver.mu.Lock()
+	defer registeredStoreDriver.mu.Unlock()
+	query := strings.ToLower(registeredStoreDriver.query)
+	for _, part := range []string{
+		"select count(*) from payment_api.outbox",
+		"where published_at is null",
+	} {
+		if !strings.Contains(query, part) {
+			t.Fatalf("query %q does not contain %q", registeredStoreDriver.query, part)
+		}
+	}
+	for _, forbidden := range []string{
+		"payment_api.payments",
+		"payment_api.idempotency",
+		"limit",
+		"order by",
+	} {
+		if strings.Contains(query, forbidden) {
+			t.Fatalf("query contains forbidden %q: %q", forbidden, registeredStoreDriver.query)
+		}
+	}
+	if len(registeredStoreDriver.queryArgs) != 0 {
+		t.Fatalf("query args = %v, want none", registeredStoreDriver.queryArgs)
+	}
+}
+
+func TestPendingCountPropagatesQueryError(t *testing.T) {
+	store := newFakeStore(t)
+	want := errors.New("count query failed")
+	registeredStoreDriver.mu.Lock()
+	registeredStoreDriver.queryErr = want
+	registeredStoreDriver.mu.Unlock()
+
+	count, err := store.PendingCount(context.Background())
+	if !errors.Is(err, want) {
+		t.Fatalf("PendingCount() error = %v, want %v", err, want)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want 0 after query error", count)
+	}
+}
+
+func TestPendingCountPropagatesScanError(t *testing.T) {
+	store := newFakeStore(t)
+	registeredStoreDriver.mu.Lock()
+	registeredStoreDriver.columns = []string{"count"}
+	registeredStoreDriver.values = [][]driver.Value{{nil}}
+	registeredStoreDriver.mu.Unlock()
+
+	if _, err := store.PendingCount(context.Background()); err == nil {
+		t.Fatal("PendingCount() error = nil, want scan error")
+	}
+}
+
 func TestMarkPublishedUsesGuardAndChecksRowsAffected(t *testing.T) {
 	store := newFakeStore(t)
 	registeredStoreDriver.mu.Lock()
